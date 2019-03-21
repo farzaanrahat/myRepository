@@ -1,0 +1,563 @@
+package com.ssc.ial.invmgmt.custody.business;
+
+import java.math.BigDecimal;
+import java.sql.SQLException;
+import java.text.ParseException;
+import java.util.Arrays;
+import java.util.Optional;
+
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.context.annotation.ComponentScan;
+import org.springframework.dao.DuplicateKeyException;
+import org.springframework.stereotype.Component;
+import org.springframework.transaction.annotation.Propagation;
+import org.springframework.transaction.annotation.Transactional;
+
+import com.ssc.ial.common.logging.IALLogger;
+import com.ssc.ial.common.logging.IALLoggerFactory;
+import com.ssc.ial.invmgmt.custody.data.CustodyDAO;
+import com.ssc.ial.invmgmt.custody.data.GsmacCustodyViewDAO;
+import com.ssc.ial.invmgmt.custody.data.SmacCustodyViewDAO;
+import com.ssc.ial.invmgmt.custody.data.entity.PositionKey;
+import com.ssc.ial.invmgmt.custody.model.CustodyMessage;
+import com.ssc.ial.invmgmt.custody.model.GsmacCustodyMessage;
+import com.ssc.ial.invmgmt.custody.model.GsmacCustodyMessageTransaction;
+import com.ssc.ial.invmgmt.custody.model.GsmacPosition;
+import com.ssc.ial.invmgmt.custody.model.GsmacTransaction;
+import com.ssc.ial.invmgmt.custody.model.SmacCustodyMessage;
+import com.ssc.ial.invmgmt.custody.model.SmacCustodyMessagePosBucket;
+import com.ssc.ial.invmgmt.custody.model.SmacCustodyMessagePosition;
+import com.ssc.ial.invmgmt.custody.model.SmacCustodyMessageRSM;
+import com.ssc.ial.invmgmt.custody.model.SmacCustodyMessageTransaction;
+import com.ssc.ial.invmgmt.custody.model.SmacPosition;
+import com.ssc.ial.invmgmt.custody.model.SmacTransaction;
+import com.ssc.ial.invmgmt.custody.util.ActStatus;
+import com.ssc.ial.invmgmt.custody.util.BusinessDataProcessingRules;
+import com.ssc.ial.invmgmt.custody.util.Constants;
+import com.ssc.ial.invmgmt.custody.util.CustodyServiceUtility;
+import com.ssc.ial.invmgmt.custody.util.RestServiceUtility;
+import com.ssc.ial.invmgmt.paas.data.entity.GsmacFundInfo;
+import com.ssc.ial.invmgmt.paas.data.entity.GsmacSetlLocLendable;
+import com.ssc.ial.invmgmt.paas.data.entity.SmacFundInfo;
+import com.ssc.ial.invmgmt.paas.data.entity.SmacSetlLocLendable;
+import com.ssc.ial.invmgmt.paas.model.SecurityDetails;
+
+
+@ComponentScan
+@Component("custodyMessageService")
+public class CustodyMessageServiceImpl implements CustodyMessageService {
+
+	@Autowired
+	CustodyDAO custodyDAO;
+	
+	@Autowired
+	GsmacCustodyViewDAO gsmacCustodyViewDAO;
+	
+	@Autowired
+	SmacCustodyViewDAO smacCustodyViewDAO;
+	
+	@Autowired
+	RestServiceUtility restServiceUtility;
+	
+
+	private static final IALLogger LOGGER = IALLoggerFactory.getLogger(CustodyMessageServiceImpl.class);
+
+	@Override
+	@Transactional
+	public void saveCustodyMessage(CustodyMessage custodyMessage) {
+	    try {
+		custodyDAO.saveCustodyMessage(custodyMessage);
+	    }catch(Exception e){
+		LOGGER.error("Error in saving custody message. SourceCorrelationID: "+custodyMessage.getSourceCorrelationId()+", error: ", e);
+		throw new RuntimeException(e);		
+	    }    
+	}
+
+	@Override
+	@Transactional
+	public void saveRawGSMACCustodyMessage(GsmacCustodyMessage gsmacCustodyMessage) {
+	    try {
+		if(gsmacCustodyMessage.getGsmacCustodyMessagePosition() != null)
+		    custodyDAO.saveRawGSMACPosition(gsmacCustodyMessage);
+		custodyDAO.saveRawGSMACTransaction(gsmacCustodyMessage);
+	    }catch(Exception e){
+		LOGGER.error("Error in saving raw gsmac custody message. SourceCorrelationID: "+gsmacCustodyMessage.getSourceCorrelationId()+", error: ", e);
+	    }   
+	}
+
+	@Override
+	@Transactional
+	public void updateCustodyMessage(CustodyMessage custodyMessage) {
+	    try {
+		custodyDAO.updateCustodyMessage(custodyMessage);
+	    }catch(Exception e){
+		LOGGER.error("Error in updating custody message. SourceCorrelationID: "+custodyMessage.getSourceCorrelationId()+", ", e);
+		throw new RuntimeException(e);		
+	    } 		
+	}
+
+	
+	@Override
+	@Transactional(propagation=Propagation.REQUIRED,readOnly=false)
+	public void saveGsmacCustodyPosition(GsmacCustodyMessage gsmacCustodyMessage) {
+	    GsmacPosition gsmacPosition ;
+	    LOGGER.info("saveGsmacPostion ----> [START] - SourceCorrelationID: "+gsmacCustodyMessage.getSourceCorrelationId());
+	    try {
+		    gsmacPosition = getGsmacPosition(gsmacCustodyMessage);
+        	    try
+        	    {
+        		if (gsmacCustodyMessage.getGsmacCustodyMessagePosition() != null)
+        		    custodyDAO.saveGsmacCustodyPosition(gsmacPosition);
+        	    }
+        	    catch (SQLException ex)
+        	    {
+        		if (ex.getCause() instanceof DuplicateKeyException && ex.getMessage().contains(Constants.GSMAC_POSITION_PK))
+        		{
+        		    LOGGER.info("Unique key constraint violation MSGID: " + gsmacCustodyMessage.getMsgId()+" SourceCorrelationID: "+gsmacCustodyMessage.getSourceCorrelationId());
+        		    custodyDAO.saveGsmacCustodyPosition(gsmacPosition);
+        		}
+        		else
+        		{
+        		    LOGGER.error("Error in saving GSMAC position. SourceCorrelationID: "+gsmacCustodyMessage.getSourceCorrelationId()+", error: ", ex);
+        		    throw new RuntimeException(ex);
+        		}
+        	    }
+        	    
+        	    gsmacCustodyMessage.getGsmacCustodyMessageTransactions().stream().forEach(gsmacCustodyMessageTransactions -> {
+        		GsmacTransaction gsmacTransaction = new GsmacTransaction();
+        		try
+        		{
+        		    // get position sequence.
+        		    gsmacTransaction = getGsmacTrasaction(gsmacCustodyMessageTransactions);
+        		    if (gsmacCustodyMessage.getGsmacCustodyMessagePosition() == null)
+					{
+						Optional<com.ssc.ial.invmgmt.custody.data.entity.GsmacPosition> position = 
+								gsmacCustodyViewDAO.findById(new PositionKey(gsmacTransaction.getPosFund(),gsmacTransaction.getPosSetlLoc(), gsmacTransaction.getPosCusip()));
+											
+						if( !position.isPresent() && ActStatus.isPresent(gsmacTransaction.getActStat()) ){
+							gsmacTransaction.setPositionSequence(new BigDecimal(Constants.DUMMY_POSITION_SEQUENCE));
+							SecurityDetails securityDetails = restServiceUtility.getSecurityInfo(gsmacTransaction.getPosCusip());
+							if (securityDetails != null) {
+								gsmacTransaction.setSecurityId(CustodyServiceUtility.xmlStringToBigDec(securityDetails.getSecurityId()));
+							}								
+						}else{
+							gsmacTransaction.setPositionSequence(position.get().getPositionSeq());
+							gsmacTransaction.setSecurityId(position.get().getSecurityId());
+						}
+					}
+        		    else
+        		    {
+        			gsmacTransaction.setPositionSequence(gsmacPosition.getPositionSequence());
+        			gsmacTransaction.setSecurityId(gsmacPosition.getSecurityId());
+        		    }
+        		    gsmacTransaction.setSourceCorrId(CustodyServiceUtility.xmlStringToBigDec(gsmacCustodyMessage.getGsmacCustodyMessageMT572().getTranRefNum()));
+        		    gsmacTransaction.setMsgId(gsmacCustodyMessage.getMsgId());
+        		    gsmacTransaction.setMessageSource(CustodyServiceUtility.trimXmlString(gsmacCustodyMessage.getSourceSystem()));
+        		  
+        		    if(gsmacCustodyMessage.getGsmacCustodyMessageRSM() !=null){
+        		    	gsmacTransaction.setRefInvType(CustodyServiceUtility.trimXmlString(gsmacCustodyMessage.getGsmacCustodyMessageRSM().getRefInvType()));
+            		    gsmacTransaction.setRefInvTypeDesc(CustodyServiceUtility.trimXmlString(gsmacCustodyMessage.getGsmacCustodyMessageRSM().getRefInvTypeDesc()));
+            		    
+        		    }
+        		    custodyDAO.saveGsmacCustodyTransaction(gsmacTransaction);
+        		}
+        		catch (ParseException | SQLException e)
+        		{
+        		    if (e.getCause() instanceof DuplicateKeyException && e.getMessage().contains(Constants.GSMAC_TRANSACTION_PK))
+        		    {
+        			LOGGER.info("GSMAC Transaction: Unique key constraint violation MSGID: " + gsmacCustodyMessage.getMsgId()+" SourceCorrelationID: "+gsmacCustodyMessage.getSourceCorrelationId());
+        			try
+        			{
+        			    custodyDAO.saveGsmacCustodyTransaction(gsmacTransaction);
+        			}
+        			catch (SQLException e1)
+        			{
+        			    LOGGER.error("Error in processing GSMAC transactions. SourceCorrelationID: "+gsmacCustodyMessage.getSourceCorrelationId()+", error:", e1);
+        			    throw new RuntimeException(e);
+        			}
+        		    }
+        		    else
+        		    {
+        			LOGGER.error("Error in processing GSMAC transactions. SourceCorrelationID: "+gsmacCustodyMessage.getSourceCorrelationId()+", error: ", e);
+        			throw new RuntimeException(e);
+        		    }
+        		}
+        	    });
+	    } catch (Exception e) {
+		LOGGER.error("Error in processing GSMAC position. SourceCorrelationID: "+gsmacCustodyMessage.getSourceCorrelationId()+", error: ", e);
+		throw new RuntimeException(e);
+	    }
+	    LOGGER.info("saveGsmacPostion ----> [END] - SourceCorrelationID: "+gsmacCustodyMessage.getSourceCorrelationId());
+	}
+
+	@Override
+	@Transactional(propagation=Propagation.REQUIRED,readOnly=false)
+	public void saveSmacCustodyPosition(SmacCustodyMessage smacCustodyMessage) {
+	    LOGGER.info("saveSmacCustodyPosition ----> [START]");
+	    SmacPosition smacPosition;
+	    try {
+        	    smacPosition = getSmacPosition(smacCustodyMessage);
+        	    try
+        	    {
+	        		if (smacPosition != null)
+	        		    custodyDAO.saveSmacCustodyPosition(smacPosition);
+	        			custodyDAO.saveSmacCustodyPublishData(smacPosition,calculateSmacCustodyPublishData(smacPosition));
+	        	    }
+        	    catch (SQLException ex)
+        	    {
+	        		if (ex.getCause() instanceof DuplicateKeyException && ex.getMessage().contains(Constants.SMAC_POSITION_PK))
+	        		{
+	        		    LOGGER.info("SMAC POSITION Unique key constraint violation MSGID: " + smacCustodyMessage.getMsgId()+" SourceCorrelationID: "+smacCustodyMessage.getSourceCorrelationId());
+	        		    custodyDAO.saveSmacCustodyPosition(smacPosition);
+	        		}
+	        		else
+	        		{
+	        		    LOGGER.error("Error in saving SMAC position. SourceCorrelationID: "+smacCustodyMessage.getSourceCorrelationId()+", error: ", ex);
+	        		    throw new RuntimeException(ex);
+	        		}
+        	    }
+        	    
+        	    Integer seq = 0;
+        	    smacCustodyMessage.getSmacCustodyMessageMT572().getSmacCustodyMessageTransaction().stream().forEach(smacCustodyMessageTransactions -> {
+    			SmacTransaction smacTransaction = new SmacTransaction();
+    			try
+    			{
+    			    smacTransaction = getSmacTrasaction(smacCustodyMessageTransactions, seq);
+    			    if (smacPosition == null)
+    			    {
+							Optional<com.ssc.ial.invmgmt.custody.data.entity.SmacPosition> position = 
+									smacCustodyViewDAO.findById(new PositionKey(smacTransaction.getPosFund(),smacTransaction.getPosSetlLoc(), smacTransaction.getPosCusip()));
+							
+							
+							if( !position.isPresent() && ActStatus.isPresent(smacTransaction.getActStat()) ){
+								smacTransaction.setPositionSequence(new BigDecimal(Constants.DUMMY_POSITION_SEQUENCE));
+								SecurityDetails securityDetails = restServiceUtility.getSecurityInfo(smacTransaction.getPosCusip());
+								if (securityDetails != null) {
+									smacTransaction.setSecurityId(CustodyServiceUtility.xmlStringToBigDec(securityDetails.getSecurityId()));
+								}								
+							}else{
+								smacTransaction.setPositionSequence(position.get().getPositionSeq());
+								smacTransaction.setSecurityId(position.get().getSecurityId());
+							}
+    			    }
+    			    else
+    			    {
+	    				smacTransaction.setPositionSequence(smacPosition.getPositionSeq());
+	    				smacTransaction.setSecurityId(smacPosition.getSecurityId());
+    			    }
+    			    smacTransaction.setSourceCorrId(CustodyServiceUtility.xmlStringToBigDec(smacCustodyMessage.getSmacCustodyMessageMT572().getTranRefNum()));
+    			    smacTransaction.setMsgId(smacCustodyMessage.getMsgId());
+    			    smacTransaction.setMessageSource(CustodyServiceUtility.trimXmlString(smacCustodyMessage.getSourceSystem()));
+    			    custodyDAO.saveSmacCustodyTransaction(smacTransaction);
+    			}
+    			catch (Exception e)
+    			{
+    			    if (e.getCause() instanceof DuplicateKeyException && e.getMessage().contains(Constants.SMAC_TRANSACTION_PK))
+    			    {
+    				LOGGER.info("SMAC Transaction Unique key constraint violation MSGID: " + smacCustodyMessage.getMsgId()+" SourceCorrelationID: "+smacCustodyMessage.getSourceCorrelationId());
+    				try
+    				{
+    				    custodyDAO.saveSmacCustodyTransaction(smacTransaction);
+    				}
+    				catch (SQLException e1)
+    				{
+    				    LOGGER.error("Error in processing SMAC transactions. SourceCorrelationID: "+smacCustodyMessage.getSourceCorrelationId()+", error: ", e1);
+    				    throw new RuntimeException(e);
+    				}
+    			    }
+    			    else
+    			    {
+    				LOGGER.error("Error in processing SMAC transactions. SourceCorrelationID: "+smacCustodyMessage.getSourceCorrelationId()+", error: ", e);
+    				throw new RuntimeException(e);
+    			    }
+    			}
+    		    });
+
+	    } catch (Exception e) {
+		LOGGER.error("Error in processing SMAC position. SourceCorrelationID: "+smacCustodyMessage.getSourceCorrelationId()+", error: ", e);
+		throw new RuntimeException(e);
+	    }
+	    LOGGER.info("saveSmacCustodyPosition ----> [END] - SourceCorrelationID: "+smacCustodyMessage.getSourceCorrelationId());
+	}
+	
+
+	private GsmacPosition getGsmacPosition(GsmacCustodyMessage gsmacCustodyMessage) throws ParseException {
+		GsmacPosition gsmacPosition = new GsmacPosition();
+		
+		// extract the position information from parsed GSMAC message.
+		if(gsmacCustodyMessage.getGsmacCustodyMessagePosition() != null){
+			gsmacPosition.setPosFund(CustodyServiceUtility.trimXmlString(gsmacCustodyMessage.getGsmacCustodyMessagePosition().getPosFund()));
+			gsmacPosition.setPosSetlLoc(CustodyServiceUtility.trimXmlString(gsmacCustodyMessage.getGsmacCustodyMessagePosition().getPosSetlLoc()));
+			gsmacPosition.setPosCusip(CustodyServiceUtility.trimXmlString(gsmacCustodyMessage.getGsmacCustodyMessagePosition().getPosCusip()));
+			gsmacPosition.setSourceCorrId(CustodyServiceUtility.xmlStringToBigDec(gsmacCustodyMessage.getGsmacCustodyMessageMT572().getTranRefNum()));
+			gsmacPosition.setMsgId(gsmacCustodyMessage.getMsgId());
+			gsmacPosition.setMsgSrc(CustodyServiceUtility.trimXmlString(gsmacCustodyMessage.getSourceSystem()));
+			gsmacPosition.setPosMatDt(CustodyServiceUtility.xmlStringToDate(gsmacCustodyMessage.getGsmacCustodyMessagePosition().getPosMatDt()));
+			gsmacPosition.setPosRate(CustodyServiceUtility.xmlStringToDouble(gsmacCustodyMessage.getGsmacCustodyMessagePosition().getPosRate()));
+	
+			gsmacPosition.setAsofTradeDt(CustodyServiceUtility.xmlStringToBigDec(gsmacCustodyMessage.getGsmacCustodyMessagePosition().getGsmacCustodyMessagePosBuckets().getAsofTradeDt()));
+			gsmacPosition.setAsofCsd(CustodyServiceUtility.xmlStringToBigDec(gsmacCustodyMessage.getGsmacCustodyMessagePosition().getGsmacCustodyMessagePosBuckets().getAsofCsd()));
+			gsmacPosition.setAsofSafe(CustodyServiceUtility.xmlStringToBigDec(gsmacCustodyMessage.getGsmacCustodyMessagePosition().getGsmacCustodyMessagePosBuckets().getAsofSafe()));
+			gsmacPosition.setAsofAvail(CustodyServiceUtility.xmlStringToBigDec(gsmacCustodyMessage.getGsmacCustodyMessagePosition().getGsmacCustodyMessagePosBuckets().getAsofAvail()));
+			gsmacPosition.setAsofOutForReg(CustodyServiceUtility.xmlStringToBigDec(gsmacCustodyMessage.getGsmacCustodyMessagePosition().getGsmacCustodyMessagePosBuckets().getAsofOutForReg()));
+			gsmacPosition.setAsofReg(CustodyServiceUtility.xmlStringToBigDec(gsmacCustodyMessage.getGsmacCustodyMessagePosition().getGsmacCustodyMessagePosBuckets().getAsofReg()));
+			gsmacPosition.setAsofUnregOth(CustodyServiceUtility.xmlStringToBigDec(gsmacCustodyMessage.getGsmacCustodyMessagePosition().getGsmacCustodyMessagePosBuckets().getAsofUnregOth()));
+			gsmacPosition.setAsofUnregVol(CustodyServiceUtility.xmlStringToBigDec(gsmacCustodyMessage.getGsmacCustodyMessagePosition().getGsmacCustodyMessagePosBuckets().getAsofUnregVol()));
+			gsmacPosition.setAsofSsbBor(CustodyServiceUtility.xmlStringToBigDec(gsmacCustodyMessage.getGsmacCustodyMessagePosition().getGsmacCustodyMessagePosBuckets().getAsofSsbBor()));
+			gsmacPosition.setAsof3ptyBor(CustodyServiceUtility.xmlStringToBigDec(gsmacCustodyMessage.getGsmacCustodyMessagePosition().getGsmacCustodyMessagePosBuckets().getAsof3ptyBor()));
+			gsmacPosition.setAsofSsbLoan(CustodyServiceUtility.xmlStringToBigDec(gsmacCustodyMessage.getGsmacCustodyMessagePosition().getGsmacCustodyMessagePosBuckets().getAsofSsbLoan()));
+			gsmacPosition.setAsof3ptyLoan(CustodyServiceUtility.xmlStringToBigDec(gsmacCustodyMessage.getGsmacCustodyMessagePosition().getGsmacCustodyMessagePosBuckets().getAsof3ptyLoan()));
+			gsmacPosition.setAsofClearing(CustodyServiceUtility.xmlStringToBigDec(gsmacCustodyMessage.getGsmacCustodyMessagePosition().getGsmacCustodyMessagePosBuckets().getAsofClearing()));
+			gsmacPosition.setAsofSeg(CustodyServiceUtility.xmlStringToBigDec(gsmacCustodyMessage.getGsmacCustodyMessagePosition().getGsmacCustodyMessagePosBuckets().getAsofSeg()));
+			gsmacPosition.setAsofBlock(CustodyServiceUtility.xmlStringToBigDec(gsmacCustodyMessage.getGsmacCustodyMessagePosition().getGsmacCustodyMessagePosBuckets().getAsofBlock()));
+			gsmacPosition.setAsofRecvColl(CustodyServiceUtility.xmlStringToBigDec(gsmacCustodyMessage.getGsmacCustodyMessagePosition().getGsmacCustodyMessagePosBuckets().getAsofRecvColl()));
+			gsmacPosition.setAsofDelColl(CustodyServiceUtility.xmlStringToBigDec(gsmacCustodyMessage.getGsmacCustodyMessagePosition().getGsmacCustodyMessagePosBuckets().getAsofDelColl()));
+			gsmacPosition.setAsofPendRec(CustodyServiceUtility.xmlStringToBigDec(gsmacCustodyMessage.getGsmacCustodyMessagePosition().getGsmacCustodyMessagePosBuckets().getAsofPendRec()));
+			gsmacPosition.setAsofPendDel(CustodyServiceUtility.xmlStringToBigDec(gsmacCustodyMessage.getGsmacCustodyMessagePosition().getGsmacCustodyMessagePosBuckets().getAsofPendDel()));
+			gsmacPosition.setAsofBear(CustodyServiceUtility.xmlStringToBigDec(gsmacCustodyMessage.getGsmacCustodyMessagePosition().getGsmacCustodyMessagePosBuckets().getAsofBear()));
+			
+			gsmacPosition.setPosSecType(CustodyServiceUtility.trimXmlString(gsmacCustodyMessage.getGsmacCustodyMessagePosition().getPosSecType()));
+			gsmacPosition.setPosIssDt(CustodyServiceUtility.xmlStringToDate(gsmacCustodyMessage.getGsmacCustodyMessagePosition().getPosIssDt()));
+			gsmacPosition.setPosFundSp(CustodyServiceUtility.trimXmlString(gsmacCustodyMessage.getGsmacCustodyMessagePosition().getPosFundSp()));
+			gsmacPosition.setPosSecsAcct(CustodyServiceUtility.trimXmlString(gsmacCustodyMessage.getGsmacCustodyMessagePosition().getPosSecsAcct()));
+			gsmacPosition.setPosSetlAcct(CustodyServiceUtility.trimXmlString(gsmacCustodyMessage.getGsmacCustodyMessagePosition().getPosSetlAcct()));
+			gsmacPosition.setPosAsofDt(CustodyServiceUtility.xmlStringToDate(BusinessDataProcessingRules.applyPositionDateRule(gsmacCustodyMessage.getGsmacCustodyMessagePosition().getPosAsofDt())));
+			gsmacPosition.setPosUserId(CustodyServiceUtility.trimXmlString(gsmacCustodyMessage.getGsmacCustodyMessagePosition().getPosUserId()));
+			gsmacPosition.setPosAction(CustodyServiceUtility.trimXmlString(gsmacCustodyMessage.getGsmacCustodyMessagePosition().getPosAction()));
+			gsmacPosition.setPosUserDt(CustodyServiceUtility.xmlStringToDate(gsmacCustodyMessage.getGsmacCustodyMessagePosition().getPosUserDt()));
+			gsmacPosition.setPosUserTm(CustodyServiceUtility.xmlStringToTimestamp(gsmacCustodyMessage.getGsmacCustodyMessagePosition().getPosUserDt(), gsmacCustodyMessage.getGsmacCustodyMessagePosition().getPosUserTm()));
+			gsmacPosition.setPosPgmId(CustodyServiceUtility.trimXmlString(gsmacCustodyMessage.getGsmacCustodyMessagePosition().getPosPgmId()));
+			gsmacPosition.setPosTranCd(CustodyServiceUtility.trimXmlString(gsmacCustodyMessage.getGsmacCustodyMessagePosition().getPosTranCd()));
+			gsmacPosition.setPosSysDt(CustodyServiceUtility.xmlStringToDate(gsmacCustodyMessage.getGsmacCustodyMessagePosition().getPosSysDt()));
+			gsmacPosition.setPosSysTm(CustodyServiceUtility.xmlStringToTimestamp(gsmacCustodyMessage.getGsmacCustodyMessagePosition().getPosSysDt(), gsmacCustodyMessage.getGsmacCustodyMessagePosition().getPosSysTm()));
+			gsmacPosition.setPosPostDt(CustodyServiceUtility.xmlStringToDate(gsmacCustodyMessage.getGsmacCustodyMessagePosition().getPosPostDt()));
+			gsmacPosition.setPosPostTm(CustodyServiceUtility.xmlStringToTimestamp(gsmacCustodyMessage.getGsmacCustodyMessagePosition().getPosPostDt(), gsmacCustodyMessage.getGsmacCustodyMessagePosition().getPosPostTm()));
+			gsmacPosition.setPosDttm(CustodyServiceUtility.xmlStringToTimestamp(gsmacCustodyMessage.getGsmacCustodyMessagePosition().getPosDttm()));
+			
+			if(gsmacCustodyMessage.getGsmacCustodyMessageRSM()!=null){
+				gsmacPosition.setRefInvType(CustodyServiceUtility.trimXmlString(gsmacCustodyMessage.getGsmacCustodyMessageRSM().getRefInvType()));
+				gsmacPosition.setRefOldCusip(CustodyServiceUtility.trimXmlString(gsmacCustodyMessage.getGsmacCustodyMessageRSM().getRefOldCusip()));
+			}
+			gsmacPosition.setActTrdId(CustodyServiceUtility.trimXmlString(gsmacCustodyMessage.getGsmacCustodyMessageTransactions().get(0).getActTrdId()));
+			GsmacFundInfo fundInfo = restServiceUtility.getFundDetails(gsmacCustodyMessage.getGsmacCustodyMessagePosition().getPosFund());
+			if(fundInfo != null)
+				gsmacPosition.setPosFundName(fundInfo.getFundName());
+			
+			GsmacSetlLocLendable gsmacSetlLocLendable = restServiceUtility.getSetlLocDetails(gsmacCustodyMessage.getGsmacCustodyMessagePosition().getPosSetlLoc());
+			if(gsmacSetlLocLendable != null)
+				gsmacPosition.setPosSetlLocName(gsmacSetlLocLendable.getLocationName());
+			
+			SecurityDetails securityDetails = restServiceUtility.getSecurityInfo(gsmacCustodyMessage.getGsmacCustodyMessagePosition().getPosCusip());
+			if(securityDetails != null)
+			{
+				gsmacPosition.setPosAssetDesc(securityDetails.getSecurityName());
+				gsmacPosition.setSecurityId(CustodyServiceUtility.xmlStringToBigDec(securityDetails.getSecurityId()));
+			}
+		}
+		return gsmacPosition;
+	}
+
+	private GsmacTransaction getGsmacTrasaction(GsmacCustodyMessageTransaction gsmacCustodyMessageTransaction) throws ParseException {
+		GsmacTransaction gsmacTransaction = new GsmacTransaction();
+		gsmacTransaction.setActTrdId(CustodyServiceUtility.trimXmlString(gsmacCustodyMessageTransaction.getActTrdId()));
+		gsmacTransaction.setActTrdIdSeq(CustodyServiceUtility.trimXmlString(gsmacCustodyMessageTransaction.getActTrdIdSeq()));
+		gsmacTransaction.setActStat(CustodyServiceUtility.trimXmlString(gsmacCustodyMessageTransaction.getActStat()));
+		gsmacTransaction.setPosFund(CustodyServiceUtility.trimXmlString(gsmacCustodyMessageTransaction.getActFund()));
+		gsmacTransaction.setPosCusip(CustodyServiceUtility.trimXmlString(gsmacCustodyMessageTransaction.getActCusip()));
+		gsmacTransaction.setActMsgSrc(CustodyServiceUtility.trimXmlString(gsmacCustodyMessageTransaction.getActMsgSrc()));
+		gsmacTransaction.setActTrdDt(CustodyServiceUtility.xmlStringToDate(gsmacCustodyMessageTransaction.getActTrdDt()));
+		gsmacTransaction.setActCsd(CustodyServiceUtility.xmlStringToDate(gsmacCustodyMessageTransaction.getActCsd()));
+		gsmacTransaction.setActActualSetlDt(CustodyServiceUtility.xmlStringToDate(gsmacCustodyMessageTransaction.getActActualSetlDt()));
+		gsmacTransaction.setPosSetlLoc(CustodyServiceUtility.trimXmlString(gsmacCustodyMessageTransaction.getActSetlLoc()));
+		gsmacTransaction.setActSetlAcct(CustodyServiceUtility.trimXmlString(gsmacCustodyMessageTransaction.getActSetlAcct()));
+		gsmacTransaction.setActCurrCd(CustodyServiceUtility.trimXmlString(gsmacCustodyMessageTransaction.getActCurrCd()));
+		gsmacTransaction.setActContShs(CustodyServiceUtility.xmlStringToBigDec(gsmacCustodyMessageTransaction.getActContShs()));
+		gsmacTransaction.setActActualShs(CustodyServiceUtility.xmlStringToBigDec(gsmacCustodyMessageTransaction.getActActualShs()));
+		gsmacTransaction.setActContAmt(CustodyServiceUtility.xmlStringToBigDec(gsmacCustodyMessageTransaction.getActContAmt()));
+		gsmacTransaction.setActNetAmt(CustodyServiceUtility.xmlStringToBigDec(gsmacCustodyMessageTransaction.getActNetAmt()));
+		gsmacTransaction.setActExecBrk(CustodyServiceUtility.trimXmlString(gsmacCustodyMessageTransaction.getActExecBrk()));
+		gsmacTransaction.setActClrngBrk(CustodyServiceUtility.trimXmlString(gsmacCustodyMessageTransaction.getActClrngBrk()));
+		gsmacTransaction.setActSysSetlDt(CustodyServiceUtility.xmlStringToDate(gsmacCustodyMessageTransaction.getActSysSetlDt()));
+		gsmacTransaction.setActComment(CustodyServiceUtility.trimXmlString(gsmacCustodyMessageTransaction.getActComment()));
+		gsmacTransaction.setActNextSeq(CustodyServiceUtility.trimXmlString(gsmacCustodyMessageTransaction.getActNextSeq()));
+		gsmacTransaction.setActTranType(CustodyServiceUtility.trimXmlString(gsmacCustodyMessageTransaction.getActTranType()));
+		gsmacTransaction.setActTranQual(CustodyServiceUtility.trimXmlString(gsmacCustodyMessageTransaction.getActTranQual()));
+		gsmacTransaction.setActRate(CustodyServiceUtility.xmlStringToBigDec(gsmacCustodyMessageTransaction.getActRate()));
+		gsmacTransaction.setActMatDt(CustodyServiceUtility.xmlStringToDate(gsmacCustodyMessageTransaction.getActMatDt())); 
+		gsmacTransaction.setActSecsAcct(CustodyServiceUtility.trimXmlString(gsmacCustodyMessageTransaction.getActSecsAcct()));
+		gsmacTransaction.setActNxtDest(CustodyServiceUtility.trimXmlString(gsmacCustodyMessageTransaction.getActNxtDest()));
+		gsmacTransaction.setActSubValDt(CustodyServiceUtility.xmlStringToDate(gsmacCustodyMessageTransaction.getActSubValDt()));
+		gsmacTransaction.setActSsbValDt(CustodyServiceUtility.xmlStringToDate(gsmacCustodyMessageTransaction.getActSsbValDt()));
+		gsmacTransaction.setActTranGrpId(CustodyServiceUtility.trimXmlString(gsmacCustodyMessageTransaction.getActTranGrpId()));
+		gsmacTransaction.setActRelCashId(CustodyServiceUtility.trimXmlString(gsmacCustodyMessageTransaction.getActRelCashId()));
+		gsmacTransaction.setActIbsSeq(CustodyServiceUtility.trimXmlString(gsmacCustodyMessageTransaction.getActIbsSeq()));
+		gsmacTransaction.setActBtchDt(CustodyServiceUtility.xmlStringToDate(gsmacCustodyMessageTransaction.getActBtchDt()));
+		gsmacTransaction.setActBtchCd(CustodyServiceUtility.trimXmlString(gsmacCustodyMessageTransaction.getActBtchCd()));
+		gsmacTransaction.setActBtchStat(CustodyServiceUtility.trimXmlString(gsmacCustodyMessageTransaction.getActBtchStat()));
+		gsmacTransaction.setActLastUser(CustodyServiceUtility.trimXmlString(gsmacCustodyMessageTransaction.getActLastUser()));
+		gsmacTransaction.setActLastAction(CustodyServiceUtility.trimXmlString(gsmacCustodyMessageTransaction.getActLastAction()));
+		gsmacTransaction.setActSysDt(CustodyServiceUtility.xmlStringToDate(gsmacCustodyMessageTransaction.getActSysDt()));
+		gsmacTransaction.setActSysDttm(	CustodyServiceUtility.xmlStringToTimestamp(gsmacCustodyMessageTransaction.getActSysDttm()));
+		return gsmacTransaction;
+	}
+
+	private SmacPosition getSmacPosition(SmacCustodyMessage smacCustodyMessage) throws ParseException {
+		SmacCustodyMessagePosition position = smacCustodyMessage.getSmacCustodyMessageMT572().getSmacCustodyMessagePosition();
+		if(position==null) return null;
+		SmacPosition smacPosition = new SmacPosition();
+		
+		smacPosition.setPosFund( CustodyServiceUtility.trimXmlString(position. getPosFund()));
+		smacPosition.setPosSetlLoc(CustodyServiceUtility.trimXmlString(position.getPosSetlLoc()));
+		smacPosition.setPosCusip(CustodyServiceUtility.trimXmlString(position.getPosCusip()));
+		
+		smacPosition.setActTrdId(smacCustodyMessage.getSmacCustodyMessageMT572().getSmacCustodyMessageTransaction().get(0).getActTrdId());
+		smacPosition.setSourceCorrId(CustodyServiceUtility.xmlStringToBigDec(smacCustodyMessage.getSourceCorrelationId()));
+		smacPosition.setMsgId(smacCustodyMessage.getMsgId());
+		smacPosition.setMsgSrc(smacCustodyMessage.getSourceSystem());
+				
+		smacPosition.setPosMatDt(CustodyServiceUtility.xmlStringToDate(position.getPosMatDt()));
+		smacPosition.setPosRate(CustodyServiceUtility.xmlStringToBigDec(position.getPosRate()));
+		
+		
+		SecurityDetails securityDetails = restServiceUtility.getSecurityInfo(position.getPosCusip());
+		if(securityDetails != null)
+			{
+			smacPosition.setPosAssetDesc(securityDetails.getSecurityName());
+			smacPosition.setSecurityId(CustodyServiceUtility.xmlStringToBigDec(securityDetails.getSecurityId()));
+			}
+		
+		SmacFundInfo fundInfo = restServiceUtility.getSmacFundDetails(position.getPosFund());
+		if(fundInfo != null)
+			smacPosition.setPosFundName(fundInfo.getFundName());
+		
+		SmacSetlLocLendable smacSetlLocLendable = restServiceUtility.getSmacSetlLocDetails(position.getPosSetlLoc());
+		if(smacSetlLocLendable != null)
+			smacPosition.setPosSetlLocName(smacSetlLocLendable.getLocationName());
+		
+		
+		if(position.getSmacCustodyMessagePosBuckets()!=null){
+			SmacCustodyMessagePosBucket bucket = position.getSmacCustodyMessagePosBuckets();
+			smacPosition.setPosTradeDateShort(CustodyServiceUtility.xmlStringToBigDec( bucket.getPosTradeDateShort()));
+			smacPosition.setPosTradeDateLong(CustodyServiceUtility.xmlStringToBigDec(bucket.getPosTradeDateLong()));
+			smacPosition.setPosSafeKeeping(CustodyServiceUtility.xmlStringToBigDec(bucket.getPosSafeKeeping()));
+			smacPosition.setPosFree(CustodyServiceUtility.xmlStringToBigDec( bucket.getPosFree()));
+			smacPosition.setPosLoanable( CustodyServiceUtility.xmlStringToBigDec( bucket.getPosLoanable()));
+			smacPosition.setPosLoaned( CustodyServiceUtility.xmlStringToBigDec( bucket.getPosLoaned()));
+			smacPosition.setPosPledged(CustodyServiceUtility.xmlStringToBigDec( bucket.getPosPledged()));
+			smacPosition.setPosRepoCollateral( CustodyServiceUtility.xmlStringToBigDec( bucket.getPosRepoCollateral()));
+			smacPosition.setPosOutForCollection( CustodyServiceUtility.xmlStringToBigDec( bucket.getPosOutForCollection()));
+			smacPosition.setPosOutForTransfer( CustodyServiceUtility.xmlStringToBigDec( bucket.getPosOutForTransfer()));
+			smacPosition.setPosPendingWithdrawal(CustodyServiceUtility.xmlStringToBigDec( bucket.getPosPendingWithdrawal()));
+			smacPosition.setPosPendingDeposit( CustodyServiceUtility.xmlStringToBigDec( bucket.getPosPendingDeposit()));
+			smacPosition.setPosPendingSale(CustodyServiceUtility.xmlStringToBigDec( bucket.getPosPendingSale()));
+			smacPosition.setPosPendingBuy( CustodyServiceUtility.xmlStringToBigDec( bucket. getPosPendingBuy()));
+			smacPosition.setPosPendingTransfer(CustodyServiceUtility.xmlStringToBigDec( bucket.getPosPendingTransfer()));
+			smacPosition.setPosPendingCollection(CustodyServiceUtility.xmlStringToBigDec( bucket.getPosPendingCollection()));
+			smacPosition.setPosAwaitingCerts(CustodyServiceUtility.xmlStringToBigDec( bucket.getPosAwaitingCerts()));
+			smacPosition.setPosBorrowed( CustodyServiceUtility.xmlStringToBigDec( bucket. getPosBorrowed()));
+			smacPosition.setPosPulledForSale(CustodyServiceUtility.xmlStringToBigDec( bucket.getPosPulledForSale()));
+			smacPosition.setPosPendingLoan(CustodyServiceUtility.xmlStringToBigDec( bucket.getPosPendingLoan()));
+			smacPosition.setPosPendingLoanReturn(CustodyServiceUtility.xmlStringToBigDec( bucket.getPosPendingLoanReturn()));
+			smacPosition.setPosPendingBorrow(CustodyServiceUtility.xmlStringToBigDec( bucket.getPosPendingBorrow()));
+			smacPosition.setPosPendingBorrowReturn(CustodyServiceUtility.xmlStringToBigDec( bucket.getPosPendingBorrowReturn()));
+			smacPosition.setPosMemoPledged(CustodyServiceUtility.xmlStringToBigDec( bucket.getPosMemoPledged()));
+			smacPosition.setPosRestricted( CustodyServiceUtility.xmlStringToBigDec( bucket. getPosRestricted()));
+			smacPosition.setPosSegregated( CustodyServiceUtility.xmlStringToBigDec( bucket. getPosSegregated()));
+			smacPosition.setPosRepoIn( CustodyServiceUtility.xmlStringToBigDec( bucket. getPosRepoIn()));
+			smacPosition.setPosRepoOut(CustodyServiceUtility.xmlStringToBigDec( bucket.getPosRepoOut()));
+			
+		}
+		 
+		
+		
+		
+		if(smacCustodyMessage.getSmacCustodyMessageMT572().getSmacCustodyMessageRSM()!=null)
+		{
+			SmacCustodyMessageRSM rsm = new SmacCustodyMessageRSM();
+			smacPosition.setRefInvType(CustodyServiceUtility.trimXmlString(rsm.getRefInvType()));
+			smacPosition.setRefOldCusip( CustodyServiceUtility.trimXmlString(rsm.getRefOldCusip()));
+			smacPosition.setRefNraTxctry(CustodyServiceUtility.trimXmlString(rsm.getRefNraTxctry()));
+			smacPosition.setRefGvtPoolNo(CustodyServiceUtility.trimXmlString(rsm.getRefGvtPoolNo()));
+			
+		}
+		smacPosition.setPosSecTyp(CustodyServiceUtility.trimXmlString(position.getPosSecType()));
+		smacPosition.setPosSetlAcct(CustodyServiceUtility.trimXmlString(position.getPosSetlAcct()));
+		smacPosition.setPosIssDt(CustodyServiceUtility.xmlStringToDate(position.getPosIssDt()));
+		smacPosition.setPosUserId(CustodyServiceUtility.trimXmlString(position.getPosUserId()));
+		smacPosition.setPosUserDt(CustodyServiceUtility.xmlStringToDate( position.getPosUserDt()));
+		smacPosition.setPosUserTm(CustodyServiceUtility.xmlStringToTimestampSmac(position.getPosUserDt(), position.getPosUserTm()));
+		smacPosition.setPosAction (CustodyServiceUtility.trimXmlString(position.getPosAction()));
+		smacPosition.setPosLastActvDate(CustodyServiceUtility.xmlStringToDate(position.getPosLastActvDate()));
+		smacPosition.setPosPtsTradeId(CustodyServiceUtility.trimXmlString(position.getPosPtsTradeId()));
+		smacPosition.setPosLastCorpactApplied(CustodyServiceUtility.xmlStringToDate(position.getPosLastCorpactApplied()));
+		smacPosition.setPosRptAssetNumSys(CustodyServiceUtility.xmlStringToBigDec(position.getPosRptAssetNumSys()));
+		smacPosition.setPosDateOfDifference(CustodyServiceUtility.xmlStringToDate(position. getPosDateOfDifference()));
+		smacPosition.setPosNextCollDate(CustodyServiceUtility.xmlStringToDate(position.getPosNextCollDate()));
+		smacPosition.setPosNextCollAmt(CustodyServiceUtility.xmlStringToBigDec(position.getPosNextCollAmt()));
+		smacPosition.setPosRegistrationType(CustodyServiceUtility.trimXmlString(position.getPosRegistrationType()));
+		smacPosition.setPosPaymentMethod(CustodyServiceUtility.trimXmlString(position.getPosPaymentMethod()));
+		smacPosition.setPosCpCusip(CustodyServiceUtility.trimXmlString(position.getPosCpCusip()));
+		smacPosition.setPosDtcMmiIncStruc(CustodyServiceUtility.trimXmlString(position.getPosDtcMmiIncStruc()));
+		smacPosition.setSmacGsmacInd(CustodyServiceUtility.trimXmlString(position.getSmacGsmacInd()));
+		
+		return smacPosition;
+	}
+
+	
+	private SmacTransaction getSmacTrasaction(SmacCustodyMessageTransaction transaction, int seq)throws ParseException {
+		SmacTransaction smacTransaction = new SmacTransaction();
+		smacTransaction.setActTrdId(CustodyServiceUtility.trimXmlString(transaction.getActTrdId()));
+		String formattedSeq = String.format("%03d", ++seq);
+		smacTransaction.setActTrdIdSeq(formattedSeq);
+		smacTransaction.setActStat(CustodyServiceUtility.trimXmlString(transaction.getActStat()));
+		smacTransaction.setPosFund(CustodyServiceUtility.trimXmlString(transaction.getActFund()));
+		smacTransaction.setPosCusip(CustodyServiceUtility.trimXmlString(transaction.getActCusip()));
+		smacTransaction.setActActualSetlDt(CustodyServiceUtility.xmlStringToDate(transaction.getActActualSetlDt()));
+		smacTransaction.setPosSetlLoc(CustodyServiceUtility.trimXmlString(transaction.getActSetlLoc()));
+		smacTransaction.setActSetlAcct(CustodyServiceUtility.trimXmlString(transaction.getActSetlAcct()));
+		smacTransaction.setActContShs(CustodyServiceUtility.xmlStringToBigDec(transaction.getActContShs()));
+		smacTransaction.setActActualShs(CustodyServiceUtility.xmlStringToBigDec(transaction.getActActualShs()));
+		smacTransaction.setActContAmt(CustodyServiceUtility.xmlStringToBigDec(transaction.getActContAmt()));
+		smacTransaction.setActNetAmt(CustodyServiceUtility.xmlStringToBigDec(transaction.getActNetAmt()));
+		smacTransaction.setActExecBrk(CustodyServiceUtility.trimXmlString(transaction.getActExecBrk()));
+		smacTransaction.setActClrngBrk(CustodyServiceUtility.trimXmlString(transaction.getActClrngBrk()));
+		smacTransaction.setActTranType(CustodyServiceUtility.trimXmlString(transaction.getActTranType()));
+		smacTransaction.setActRate(CustodyServiceUtility.xmlStringToBigDec(transaction.getActRate()));
+		smacTransaction.setActMatDt(CustodyServiceUtility.xmlStringToDate(transaction.getActMatDt()));
+		smacTransaction.setActOrigFace(CustodyServiceUtility.xmlStringToBigDec(transaction.getActOrigFace()));
+		smacTransaction.setActPmtMeth(CustodyServiceUtility.trimXmlString(transaction.getActPmtMeth()));
+		smacTransaction.setActRsn(CustodyServiceUtility.trimXmlString(transaction.getActRsn()));
+		smacTransaction.setActDateAdded(CustodyServiceUtility.xmlStringToDate(transaction.getActDateAdded()));
+		smacTransaction.setActTimeAdded(CustodyServiceUtility.xmlStringToTimestampSmac(transaction.getActDateAdded() , transaction.getActTimeAdded()));
+		smacTransaction.setActLastUser(CustodyServiceUtility.trimXmlString(transaction.getActLastUser()));
+		smacTransaction.setActLastDt(CustodyServiceUtility.xmlStringToDate(transaction.getActLastDt()));
+		smacTransaction.setActLastTm(CustodyServiceUtility.xmlStringToTimestampSmac(transaction.getActLastDt() , transaction.getActLastTm()));
+		return smacTransaction;
+	}
+
+	private BigDecimal calculateSmacCustodyPublishData(SmacPosition smacPosition) {
+
+		BigDecimal posFree=new BigDecimal(0);
+		BigDecimal pendSale=new BigDecimal(0);
+		BigDecimal pendWithdrawal=new BigDecimal(0);
+		BigDecimal posLoaned=new BigDecimal(0);
+
+		if(smacPosition.getPosFree()!=null)
+			posFree=smacPosition.getPosFree();
+
+		if(smacPosition.getPosPendingSale()!=null)
+			pendSale=smacPosition.getPosPendingSale();
+
+		if(smacPosition.getPosPendingWithdrawal()!=null)
+			pendWithdrawal=smacPosition.getPosPendingWithdrawal();
+
+		if(smacPosition.getPosLoaned()!=null)
+			posLoaned=smacPosition.getPosLoaned();
+
+
+		 return posFree.subtract(pendSale).subtract(pendWithdrawal).add(posLoaned);
+
+
+	}
+
+}
