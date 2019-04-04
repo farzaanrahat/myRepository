@@ -1,0 +1,62 @@
+for any transaction if ASOF_PEND_DEL is 0, then ASOF_PEND_LOAN_DEL =0.
+
+
+Calculate ASOF_PEND_LOAN_DEL only for loan transaction. 
+
+using formula
+
+ASOF_PEND_LOAN_DEL
+
+two scenarios:
+1. if position is new:
+	old_ASOF_PEND_LOAN_DEL =0;
+	
+	
+2. if position is old: 
+	old_ASOF_PEND_LOAN_DEL= fetch is from DB (already there in position)
+	
+	
+	
+ASOF_PEND_LOAN_DEL = New(ASOF_PEND_DEL) - old (ASOF_PEND_DEL) +  old( old_ASOF_PEND_LOAN_DEL)
+                                          
+total = avail + pending_loan + ssb_onLoan; 
+
+
+Publ
+
+	private BigDecimal calculateGsmacCustodyPublishData(GsmacPosition gsmacPosition) {
+
+		BigDecimal asOfAvail=new BigDecimal(0);
+		BigDecimal asOfPendLoanDel = null;
+		BigDecimal asOfSsbLoan=new BigDecimal(0);
+		BigDecimal totalPos = new BigDecimal(0);
+		BigDecimal oldAsOfPendLoanDel = new BigDecimal(0);
+		BigDecimal oldAsofPendDel = new BigDecimal(0);
+		BigDecimal newAsofPendDel = new BigDecimal(0);
+		
+		
+
+		if(gsmacPosition.getAsofAvail()!=null)
+			asOfAvail=gsmacPosition.getAsofAvail();
+
+
+		if(gsmacPosition.getAsofSsbLoan()!=null)
+			asOfSsbLoan=gsmacPosition.getAsofSsbLoan();
+
+		 
+		 if(gsmacPosition.getAsofPendLoanDel()!=null && gsmacPosition.getAsofPendLoanDel() == new BigDecimal(0))
+		 {
+			 asOfPendLoanDel = new BigDecimal(0);
+		 }
+
+		 if(gsmacPosition.getActTranType() == "LOAN"){
+			 
+			 List<SmacGsmacPostion> gsmacPositionList = cusViewServiceImpl.getGsmacPosition(gsmacPosition.getPosFundName());
+			 
+			 oldAsofPendDel = gsmacPositionList.get(0).getAsofPendDel();
+			 
+			  asOfPendLoanDel = newAsofPendDel.subtract(oldAsofPendDel).add(oldAsOfPendLoanDel);
+			 
+ }
+		return asOfAvail.add(asOfSsbLoan).add(asOfPendLoanDel);
+	}

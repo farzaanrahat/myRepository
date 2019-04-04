@@ -1,0 +1,91 @@
+##-----##
+## IAL ##
+##-----##
+IAL_DEV =
+  (DESCRIPTION =
+    (ADDRESS_LIST =
+      (ADDRESS = (PROTOCOL = TCP)(HOST = jabo08-scan)(PORT = 1521))
+    )
+    (CONNECT_DATA =
+      (SERVICE_NAME = SLE.DEV.BOTH))
+  )
+
+
+
+##-----##
+## SLE ##
+##-----##
+SLE_PROD =
+ (DESCRIPTION_LIST =
+   (FAILOVER=TRUE)
+   (LOAD_BALANCE=no)
+     (DESCRIPTION = (ADDRESS = (PROTOCOL = TCP)(HOST = gdcx13-scan)(PORT = 1521))
+       (CONNECT_DATA = (SERVER = DEDICATED) (SERVICE_NAME = SLE.PROD.CORESERVICE)))
+     (DESCRIPTION = (ADDRESS = (PROTOCOL = TCP)(HOST = dc3x01-scan)(PORT = 1521))
+       (CONNECT_DATA = (SERVER = DEDICATED) (SERVICE_NAME = SLE.PROD.CORESERVICE)))
+)
+
+IAL_UAT = 
+  (DESCRIPTION = 
+    (ADDRESS_LIST = 
+      (ADDRESS = (PROTOCOL = TCP)(HOST = gdco01-scan)(PORT = 1521))
+    )
+    (CONNECT_DATA = 
+      (SERVICE_NAME = SLE.UAT.CORESERVICE))
+  )
+
+  
+  IAL_PREPROD = 
+  (DESCRIPTION = 
+    (ADDRESS_LIST = 
+      (ADDRESS = (PROTOCOL = TCP)(HOST = gdcx16-scan)(PORT = 1521))
+    )
+    (CONNECT_DATA = 
+      (SERVICE_NAME = IAL.PREPROD.SHARE))
+  )
+
+  
+
+##-----##
+## ITP ##
+##-----##
+
+IRISCONFIG_UA1 = 
+  (DESCRIPTION = 
+    (ADDRESS_LIST = 
+      (ADDRESS = (PROTOCOL = TCP)(HOST = GDCQL3359.statestr.com)(PORT = 1528))
+    )
+    (CONNECT_DATA = 
+      (SERVICE_NAME = O01ITP1))
+  )
+  
+  
+  
+IRISCONFIG_UA3 = 
+  (DESCRIPTION = 
+    (ADDRESS_LIST = 
+      (ADDRESS = (PROTOCOL = TCP)(HOST = GDCQL3360.statestr.com)(PORT = 1521))
+    )
+    (CONNECT_DATA = 
+      (SERVICE_NAME = O02ITP1))
+  )
+  
+  
+IRISCONFIG_UA3 = 
+  (DESCRIPTION = 
+    (ADDRESS_LIST = 
+      (ADDRESS = (PROTOCOL = TCP)(HOST = GDCX16-SCAN)(PORT = 1521))
+    )
+    (CONNECT_DATA = 
+      (SERVICE_NAME = ITP.UAT.SHARE))
+  )
+  
+  
+  IRISCONFIG_PROD = 
+  (DESCRIPTION = 
+    (ADDRESS_LIST = 
+      (ADDRESS = (PROTOCOL = TCP)(HOST = gdcx13-scan)(PORT = 1521))
+    )
+    (CONNECT_DATA = 
+      (SERVICE_NAME = ITP.PROD.SHARE))
+  )

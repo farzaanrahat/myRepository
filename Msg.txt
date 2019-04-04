@@ -104,7 +104,7 @@ public class CustodyMessageServiceImpl implements CustodyMessageService {
 	    LOGGER.info("saveGsmacPostion ----> [START] - SourceCorrelationID: "+gsmacCustodyMessage.getSourceCorrelationId());
 	    try {
 		    gsmacPosition = getGsmacPosition(gsmacCustodyMessage);
-        	    try
+        	    try    
         	    {
         		if (gsmacCustodyMessage.getGsmacCustodyMessagePosition() != null)
         		    custodyDAO.saveGsmacCustodyPosition(gsmacPosition);
